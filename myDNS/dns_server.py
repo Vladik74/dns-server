@@ -1,34 +1,14 @@
 import binascii
+from os import path
 from typing import Tuple, List
 import socket
 from records import AnswerRecord, QueryRecord
 from random import choice
+import datetime
+import pickle
 
 
-def lookup(url: str):
-    query = build_query(url)
-    current_server_ip = root_server
-
-    while True:
-        response = send_udp_message(query, current_server_ip, 53)
-        ans, auths, adds = read_response(response)
-        if len(ans) != 0:
-            return ans
-        adds = list(filter(lambda r: r.record_type == "0001", adds))
-        # random_auth_address = choice(auths).address
-        random_auth_address = auths[0].address
-        ip = ''
-        for add in adds:
-            if random_auth_address == add.name:
-                ip = add.address
-                break
-        if ip:
-            current_server_ip = ip
-        else:
-            current_server_ip = choice(lookup(random_auth_address)).address
-
-
-def send_udp_message(message, address, port):
+def send_udp_message(message, address):
     server_address = (address, port)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -52,7 +32,6 @@ def build_query(required_address):
     hex_required_address = ''
     for d in domains:
         hex_required_address += format(len(d), '02x') + d.encode('ascii').hex()
-    # print(hex_required_address)
     QTYPE = '0001'
     QCLASS = '0001'
     question += hex_required_address + '00' + QTYPE + QCLASS
@@ -70,7 +49,6 @@ def get_url(message: str, start: int, url_len: int = None) -> Tuple[str, int]:
             offset_url, _ = get_url(message, offset)
             url += offset_url
             return url, current_index + 4
-            # current_index += 4
         else:
             token = message[
                     current_index + 2: current_index + current_token_len + 2]
@@ -101,28 +79,24 @@ def parse_query(message: str, start: int) -> Tuple[QueryRecord, int]:
     name, current_index = get_url(message, current_index)
     record_type, current_index = take(message, current_index, 4)
     record_class, current_index = take(message, current_index, 4)
-    return QueryRecord(name, record_type), current_index
+    return QueryRecord(name, record_type, current_index), current_index
 
 
 def parse_answer(message: str, start: int) -> Tuple[AnswerRecord, int]:
-    current_index = start
-    encoded_offset, current_index = take(message, current_index, 4)
-    offset = get_offset(encoded_offset) * 2
-    name, _ = get_url(message, offset)
+    name, current_index = get_url(message, start)
     record_type, current_index = take(message, current_index, 4)
     record_class, current_index = take(message, current_index, 4)
     ttl, current_index = take(message, current_index, 8)
     data_length, current_index = take(message, current_index, 4)
     data_length = int(data_length, 16)
     if record_type == '0001' or record_type == '001c':
-        address, current_index = take(message, current_index,
-                                      data_length * 2)
+        address, current_index = take(message, current_index, data_length * 2)
     else:
         address, current_index = get_url(message, current_index,
                                          data_length * 2)
-    # print(bytes.fromhex(address).decode('ascii'))
-
-    return AnswerRecord(name, record_type, int(ttl, 16), address), current_index
+    print(message)
+    return AnswerRecord(name, record_type, int(ttl, 16), address,
+                        current_index, message), current_index
 
 
 def decode_ip(address: str, record_type: str):
@@ -136,13 +110,12 @@ def decode_ip(address: str, record_type: str):
     return ip
 
 
-def read_response(response) -> Tuple[List[AnswerRecord], List[AnswerRecord],
+def read_response(response) -> Tuple[List[QueryRecord],
+                                     List[AnswerRecord], List[AnswerRecord],
                                      List[AnswerRecord]]:
     ind = 0
     transaction_id, ind = take(response, ind, 4)
     flags, ind = take(response, ind, 4)
-    # if flags != '8000':
-    #     raise ConnectionError("There are some problems with server access")
     questions_number, ind = take(response, ind, 4)
     answers_number, ind = take(response, ind, 4)
     authority_number, ind = take(response, ind, 4)
@@ -172,20 +145,88 @@ def read_response(response) -> Tuple[List[AnswerRecord], List[AnswerRecord],
         additional.address = ip
         additionals.append(additional)
 
-    print('ANSWERS')
-    print(*answers, sep='\n')
+    for answer in answers:
+        write_to_cache(answer)
 
-    print('AUTHORITIVES')
-    print(*authoritives, sep='\n')
+    return questions, answers, authoritives, additionals
 
-    print('ADDITIONALS')
-    print(*additionals, sep='\n')
 
-    return answers, authoritives, additionals
+def lookup(message: str, is_url=False):
+    current_server_ip = root_server
+    if is_url:
+        message = build_query(message)
+
+    while True:
+        response = send_udp_message(message, current_server_ip)
+        quests, ans, auths, adds = read_response(response)
+        if len(ans) != 0:
+            return ans if is_url else response
+        adds = list(filter(lambda r: r.record_type == "0001", adds))
+        random_auth_address = choice(auths).address
+        ip = ''
+        for add in adds:
+            if random_auth_address == add.name:
+                ip = add.address
+                break
+        if ip:
+            current_server_ip = ip
+        else:
+            current_server_ip = choice(
+                lookup(random_auth_address, is_url=True)).address
+
+
+def write_to_cache(answer: AnswerRecord):
+    answer.death_time = (datetime.datetime.now() +
+                         datetime.timedelta(seconds=answer.ttl))
+    with open("cache.pickle", 'rb') as cache:
+        current_cache = pickle.load(cache)
+    current_cache.append(answer)
+    with open("cache.pickle", 'wb') as cache:
+        pickle.dump(current_cache, cache)
+
+
+def check_cache(url: str):
+    if not path.exists("cache.pickle"):
+        with open("cache.pickle", 'wb') as w_cache:
+            pickle.dump([], w_cache)
+            return None
+    else:
+        with open("cache.pickle", 'rb') as r_cache:
+            current_time = datetime.datetime.now()
+            current_cache = pickle.load(r_cache)
+            for c in current_cache:
+                if c.name == url:
+                    if current_time > c.death_time:
+                        current_cache.remove(c)
+                    else:
+                        return c.message
+        with open("cache.pickle", 'wb') as w_cache:
+            pickle.dump(current_cache, w_cache)
 
 
 if __name__ == "__main__":
-    root_server = "199.7.83.42"
-    required_address = input()
-    answers = lookup(required_address)
-    print(answers, sep='\n')
+    root_server = '199.7.83.42'
+    port = 53
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind(('127.0.0.1', port))
+        while True:
+            data, addr = s.recvfrom(1024)
+            response = binascii.hexlify(data).decode()
+            transaction_id = response[0:4]
+            print(transaction_id)
+            quests, ans, auths, adds = read_response(response)
+            query = quests[-1]
+            query_end_index = query.end_index
+            requested_url = query.name
+            existed_answer = check_cache(requested_url)
+            if existed_answer:
+                changed_cache_answer = transaction_id + existed_answer[4:]
+                s.sendto(bytes.fromhex(changed_cache_answer), addr)
+            else:
+                new_response = response[:20] + '0000' + response[24:]
+                send_data = lookup(new_response)
+                # print(send_data, sep='\n')
+                # print('\n' * 2)
+                # with open("cache.pickle", 'rb') as cache:
+                #     print(pickle.load(cache))
+                s.sendto(bytes.fromhex(send_data), addr)
