@@ -94,8 +94,9 @@ def parse_answer(message: str, start: int) -> Tuple[AnswerRecord, int]:
     else:
         address, current_index = get_url(message, current_index,
                                          data_length * 2)
+    print(message)
     return AnswerRecord(name, record_type, int(ttl, 16), address,
-                        current_index), current_index
+                        current_index, message), current_index
 
 
 def decode_ip(address: str, record_type: str):
@@ -188,6 +189,7 @@ def check_cache(url: str):
     if not path.exists("cache.pickle"):
         with open("cache.pickle", 'wb') as w_cache:
             pickle.dump([], w_cache)
+            return None
     else:
         with open("cache.pickle", 'rb') as r_cache:
             current_time = datetime.datetime.now()
@@ -196,6 +198,8 @@ def check_cache(url: str):
                 if c.name == url:
                     if current_time > c.death_time:
                         current_cache.remove(c)
+                    else:
+                        return c.message
         with open("cache.pickle", 'wb') as w_cache:
             pickle.dump(current_cache, w_cache)
 
@@ -208,16 +212,21 @@ if __name__ == "__main__":
         while True:
             data, addr = s.recvfrom(1024)
             response = binascii.hexlify(data).decode()
+            transaction_id = response[0:4]
+            print(transaction_id)
             quests, ans, auths, adds = read_response(response)
             query = quests[-1]
             query_end_index = query.end_index
             requested_url = query.name
-            check_cache(requested_url)
-            r = response[:24]
-            new_response = response[:20] + '0000' + response[24:]
-            send_data = lookup(new_response)
-            # print(send_data, sep='\n')
-            # print('\n' * 2)
-            # with open("cache.pickle", 'rb') as cache:
-            #     print(pickle.load(cache))
-            s.sendto(bytes.fromhex(send_data), addr)
+            existed_answer = check_cache(requested_url)
+            if existed_answer:
+                changed_cache_answer = transaction_id + existed_answer[4:]
+                s.sendto(bytes.fromhex(changed_cache_answer), addr)
+            else:
+                new_response = response[:20] + '0000' + response[24:]
+                send_data = lookup(new_response)
+                # print(send_data, sep='\n')
+                # print('\n' * 2)
+                # with open("cache.pickle", 'rb') as cache:
+                #     print(pickle.load(cache))
+                s.sendto(bytes.fromhex(send_data), addr)

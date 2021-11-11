@@ -1,12 +1,14 @@
 class AnswerRecord:
     def __init__(self, name: str, record_type: str, ttl: int, address: str,
-                 end_index: int, death_time = None):
+                 end_index: int, message=None, death_time=None):
         self.name = name
         self.record_type = record_type
         self.ttl = ttl
         self.address = address
         self.end_index = end_index
+        self.message = message
         self.death_time = death_time
+
 
     def __repr__(self):
         return (f'AnswerRecord(name={self.name}, '
